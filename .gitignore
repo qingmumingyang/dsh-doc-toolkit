@@ -1,0 +1,28 @@
+# 依赖
+node_modules/
+
+# 日志
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 测试产物
+test-output/
+*.test.pdf
+*.test.docx
+*.test.xlsx
+*.test.csv
+
+# 说明：lib/（TypeScript 编译产物）刻意【不】忽略——
+# 仓库随附预编译产物，用户从 GitHub 直接安装即可使用，无需本机执行 npm run build。
