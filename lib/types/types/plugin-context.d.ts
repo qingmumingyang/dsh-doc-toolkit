@@ -29,6 +29,15 @@ export interface PluginContext {
     skills: {
         register(skill: RuntimeSkillInput): () => void;
     };
+    /** 沙箱文件系统服务（@deepseek-ai/dsh-fs-sandbox 提供，可选；本插件仅用于路径解析）。 */
+    fs?: {
+        resolve(path: string, opts?: {
+            cwd?: string;
+            signal?: AbortSignal;
+        }): Promise<{
+            displayPath: string;
+        }>;
+    };
     /** 日志服务：直接可调用的 logger 对象（官方插件用法）。 */
     logger: {
         info(message?: unknown, ...args: unknown[]): void;

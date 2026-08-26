@@ -4,6 +4,10 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import type { ReadResult } from '../types/index.js'
 import type { PluginContext } from '../types/plugin-context.js'
+import { resolveFilePath } from '../utils/fs-path.js'
+
+/** 单次返回的最大字符数（PDF/DOCX 全文可能很长，超出后截断并标记，防止撑爆上下文）。 */
+const MAX_TEXT_CHARS = 50000
 
 /**
  * 解析 PDF 文本层。
@@ -102,8 +106,21 @@ function parseCSVRows(content: string): string[][] {
   return rows
 }
 
+/**
+ * 解码文件字节为文本：优先严格 UTF-8，失败（含非法序列）时回退 GBK——
+ * 中国用户常见的 Excel 导出 CSV 是 GBK/GB18030 编码，零依赖自动兼容。
+ */
+function decodeText(buffer: Buffer): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+  } catch {
+    return new TextDecoder('gbk').decode(buffer)
+  }
+}
+
 async function parseCSV(filePath: string, offset?: number, limit?: number, signal?: AbortSignal): Promise<{ text: string; total: number; truncated: boolean }> {
-  let content = await fs.readFile(filePath, 'utf-8')
+  const buffer = await fs.readFile(filePath, { signal })
+  let content = decodeText(buffer)
   if (content.charCodeAt(0) === 0xfeff) content = content.slice(1) // 去掉 UTF-8 BOM
   const rows = parseCSVRows(content)
   const start = Math.max(0, (offset ?? 1) - 1)
@@ -163,11 +180,13 @@ export function registerReadTools(ctx: PluginContext) {
       },
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const format = args.format === 'auto' || !args.format ? detectFormat(args.file_path) : args.format
+        // 相对路径按 DSH 后端语义解析（会话工作区为基准），绝对路径原样使用
+        const filePath = await resolveFilePath(ctx, args.file_path, exec.signal)
+        const format = args.format === 'auto' || !args.format ? detectFormat(filePath) : args.format
 
         if (format === 'unknown') {
           return JSON.stringify({
-            error: `无法识别文件格式: ${args.file_path}`,
+            error: `无法识别文件格式: ${filePath}`,
             supported: ['pdf', 'docx', 'xlsx', 'csv', 'txt']
           }, null, 2)
         }
@@ -176,7 +195,7 @@ export function registerReadTools(ctx: PluginContext) {
         try {
           switch (format) {
             case 'pdf': {
-              const dataBuffer = await fs.readFile(args.file_path, { signal: exec.signal })
+              const dataBuffer = await fs.readFile(filePath, { signal: exec.signal })
               // 关键：必须把 Node Buffer 拷贝为独立 Uint8Array 再交给 pdf.js。
               // 小文件 readFile 返回的 Buffer 来自共享内存池（byteOffset ≠ 0），
               // pdf.js v1.10 会把池中垃圾数据当成 PDF 内容解析，导致
@@ -188,21 +207,21 @@ export function registerReadTools(ctx: PluginContext) {
               break
             }
             case 'docx': {
-              const parsed = await parseDOCX(args.file_path)
+              const parsed = await parseDOCX(filePath)
               result.content = parsed.text
               result.total_lines = parsed.text.split('\n').length
               if (parsed.messages.length > 0) result.warnings = parsed.messages
               break
             }
             case 'xlsx': {
-              const parsed = await parseXLSX(args.file_path, args.offset, args.limit)
+              const parsed = await parseXLSX(filePath, args.offset, args.limit)
               result.content = parsed.text
               result.total_lines = parsed.total
               result.truncated = parsed.truncated
               break
             }
             case 'csv': {
-              const parsed = await parseCSV(args.file_path, args.offset, args.limit, exec.signal)
+              const parsed = await parseCSV(filePath, args.offset, args.limit, exec.signal)
               result.content = parsed.text
               result.total_lines = parsed.total
               result.truncated = parsed.truncated
@@ -214,9 +233,16 @@ export function registerReadTools(ctx: PluginContext) {
         } catch (err) {
           return JSON.stringify({
             error: `读取文件失败: ${err instanceof Error ? err.message : String(err)}`,
-            file_path: args.file_path,
+            file_path: filePath,
             format
           }, null, 2)
+        }
+
+        // 字符级兜底截断：PDF/DOCX 全文或超长行可能远超上下文窗口
+        if (result.content.length > MAX_TEXT_CHARS) {
+          result.content = result.content.slice(0, MAX_TEXT_CHARS) +
+            `\n... (内容过长，已截取前 ${MAX_TEXT_CHARS} 字符；PDF/DOCX 无法翻页，可分段处理或缩小文档范围)`
+          result.truncated = true
         }
 
         if (args.offset) result.offset = args.offset

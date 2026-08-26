@@ -51,9 +51,13 @@ npm install
 # 3. 编译 TypeScript（生成 lib/ 目录）
 npm run build
 
-# 4. 加载到 DSH web profile
-dsh plugin --profile web add D:\path\to\dsh-doc-toolkit
+# 4. 加载到 DSH web profile（推荐用 link: 软链方式，改代码后只重启不重装）
+dsh plugin --profile web add link:.
+# 或指定路径：
+# dsh plugin --profile web add link:D:\path\to\dsh-doc-toolkit
 ```
+
+> `link:` 方式会在 `%USERPROFILE%\.dsh\profiles\web\package.json` 的 `dependencies` 写入绝对路径软链。**目录移动/删除会导致 DSH 启动失败**，升级插件用 `git pull` 即可，无需重装。
 
 ### 方式三：桌面版手动安装（没有 dsh 命令行时）
 
@@ -212,9 +216,8 @@ dsh-doc-toolkit/
 │   └── doc-toolkit-usage/
 │       └── SKILL.md              # 内置技能，教 AI 如何使用工具
 ├── lib/                          # 编译产物（已提交，GitHub 安装免编译）
-├── test-output/
-│   ├── tests.mjs                 # node:test 测试套件（25 个用例）
-│   └── sample-*.{pdf,docx,xlsx,csv}  # 测试样例文件
+├── tests/
+│   └── tests.mjs                 # 自包含 node:test 测试套件（15 个用例，夹具运行时生成）
 ├── package.json                  # npm 配置，含 dsh.bundle 声明
 ├── tsconfig.json                 # TypeScript 编译配置
 ├── cordis.patch.yml              # DSH 插件补丁文件（bundle 插入行）
@@ -243,6 +246,18 @@ dsh-doc-toolkit/
 6. **版本兼容**
    插件的 `peerDependencies` 与桌面版内置版本匹配（`@deepseek-ai/cordis` 4.x、`@deepseek-ai/dsh-tools` 0.1.x-rc）。若桌面版升级后工具注册报错，请同步调整这两个版本范围。
 
+7. **超长内容自动截断**
+   单次读取超过 50,000 字符时自动截断并标记 `truncated: true`（防止撑爆上下文）。PDF/DOCX 无法翻页，可缩小文档范围后分段处理。
+
+8. **CSV 编码自动识别**
+   优先按 UTF-8 解码，失败时自动回退 GBK/GB18030（兼容 Excel 导出的中文 CSV），无需手动指定编码。
+
+9. **文件访问不经过沙箱策略**
+   本插件直接用 Node fs 读写文件（PDF/DOCX/XLSX 为二进制，DSH 的 `ctx.fs` 只有文本 API），因此 `write_document` **不受** DSH 的 workspace-write 沙箱围栏约束，可以写工作区外路径。请仅在信任的环境中使用。
+
+10. **工具名冲突**
+    `read_document` / `write_document` 是通用工具名。若同时安装其他注册同名工具的文档插件（如 dsh-cowork 类插件），注册会因重名抛错。卸载其一即可。
+
 ---
 
 ## 🛠️ 开发与调试
@@ -256,7 +271,7 @@ npm run build
 
 ### 运行测试
 
-项目自带基于 `test-output/` 样例文件的测试套件（node:test，25 个用例，覆盖 4 种格式的读写、PDF 分页与字体子集、CSV 转义与错误路径）：
+项目自带自包含测试套件（node:test，15 个用例，夹具运行时生成，无需外部样例文件；覆盖 CSV/XLSX/DOCX/PDF 读写往返、分页、引号转义、GBK 解码、超长截断与错误路径）：
 
 ```powershell
 npm install   # 首次

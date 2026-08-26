@@ -23,7 +23,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --test test-output/tests.mjs",
+    "test": "node --test tests/tests.mjs",
     "prepublishOnly": "npm run build"
   },
   "repository": {

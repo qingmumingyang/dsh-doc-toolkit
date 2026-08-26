@@ -24,5 +24,8 @@ test-output/
 *.test.xlsx
 *.test.csv
 
+# 说明：tests/（node:test 测试套件）刻意【不】忽略，随仓库发布；
+# test-output/ 仅存放本地诊断脚本与临时产物。
+
 # 说明：lib/（TypeScript 编译产物）刻意【不】忽略——
 # 仓库随附预编译产物，用户从 GitHub 直接安装即可使用，无需本机执行 npm run build。

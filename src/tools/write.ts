@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { writePDF } from './pdf-write.js'
 import type { PluginContext } from '../types/plugin-context.js'
+import { resolveFilePath } from '../utils/fs-path.js'
 
 /** docx 是 CJS 包，动态 import 时命名导出在类型层面不可靠，运行时统一取 default ?? 命名空间。 */
 interface DocxModule {
@@ -169,7 +170,9 @@ PDF：content 包含 paragraphs（字符串数组）或 content（纯文本，�
         render: (_args, value) => [{ type: 'text', text: value }]
       },
       async execute(args, exec) {
-        const dir = path.dirname(args.file_path)
+        // 相对路径按 DSH 后端语义解析（会话工作区为基准），绝对路径原样使用
+        const filePath = await resolveFilePath(ctx, args.file_path, exec.signal)
+        const dir = path.dirname(filePath)
         try {
           await fs.mkdir(dir, { recursive: true })
         } catch {
@@ -179,20 +182,20 @@ PDF：content 包含 paragraphs（字符串数组）或 content（纯文本，�
         try {
           switch (args.format) {
             case 'docx':
-              return await writeDOCX(args.file_path, args.content, exec.signal)
+              return await writeDOCX(filePath, args.content, exec.signal)
             case 'xlsx':
-              return await writeXLSX(args.file_path, args.content, exec.signal)
+              return await writeXLSX(filePath, args.content, exec.signal)
             case 'csv':
-              return await writeCSV(args.file_path, args.content, exec.signal)
+              return await writeCSV(filePath, args.content, exec.signal)
             case 'pdf':
-              return await writePDF(args.file_path, args.content, exec.signal)
+              return await writePDF(filePath, args.content, exec.signal)
             default:
               return `不支持的格式: ${args.format}`
           }
         } catch (err) {
           return JSON.stringify({
             error: `写入文件失败: ${err instanceof Error ? err.message : String(err)}`,
-            file_path: args.file_path,
+            file_path: filePath,
             format: args.format
           }, null, 2)
         }
