@@ -26,7 +26,7 @@
 
 ### 前置条件
 
-- 已安装 [DeepSeek Harness 桌面版](https://github.com/deepseek-ai/deepseek-harness)
+- 已安装 [DeepSeek Harness 桌面版](https://github.com/sdkwork-ai/deepseek-harness-desktop/releases)（社区桌面发行版，基于官方 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，建议 v0.1.0-rc.12 及以上）
 - Node.js v18+ 与 npm（仅安装/开发时需要，运行时由 DSH 提供）
 
 ### 方式一：从 GitHub 安装（推荐给普通用户）
