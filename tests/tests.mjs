@@ -138,17 +138,34 @@ test('DOCX 往返：标题 + 段落读回验证', async () => {
 })
 
 // ---------- PDF 读写 ----------
-test('PDF 往返：write_document 生成后 read_document 提取文本', async () => {
+test('PDF 往返：write_document 生成后 read_document 提取文本（纯 ASCII，CI 无中文字体也能跑）', async () => {
   const file = join(WORK, 'out.pdf')
   const msg = await writeDoc({
     file_path: file,
     format: 'pdf',
-    content: { title: '测试 PDF', paragraphs: ['Hello PDF World', '第二行内容'] },
+    content: { title: 'Test PDF', paragraphs: ['Hello PDF World', 'Second line'] },
   })
   assert.ok(msg.includes('成功写入 PDF'), msg)
   const r = await readDoc({ file_path: file, format: 'pdf' })
   assert.ok(r.content.includes('Hello PDF World'), `应提取出文本，实际: ${JSON.stringify(r.content)}`)
   assert.equal(typeof r.pages, 'number')
+})
+
+test('PDF 中文导出：有系统中文字体时验证（无字体环境自动跳过）', async (t) => {
+  const file = join(WORK, 'cn.pdf')
+  const msg = await writeDoc({
+    file_path: file,
+    format: 'pdf',
+    content: { title: '测试 PDF', paragraphs: ['第一行中文', '第二行中文'] },
+  })
+  if (msg.includes('未找到可用的系统中文字体')) {
+    t.skip('当前环境无 CJK 字体，跳过中文 PDF 断言')
+    return
+  }
+  assert.ok(msg.includes('成功写入 PDF'), msg)
+  assert.ok(msg.includes('内嵌字体'), '应内嵌中文字体子集')
+  const r = await readDoc({ file_path: file, format: 'pdf' })
+  assert.ok(r.content.includes('测试 PDF'), `应提取出中文，实际: ${JSON.stringify(r.content)}`)
 })
 
 test('PDF：损坏文件应优雅报错且不挂起', async () => {

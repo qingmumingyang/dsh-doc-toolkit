@@ -20,6 +20,9 @@ jobs:
           node-version: ${{ matrix.node }}
           cache: npm
 
+      - name: Install CJK fonts (for Chinese PDF tests)
+        run: sudo apt-get update && sudo apt-get install -y fonts-wqy-zenhei
+
       - name: Install dependencies
         run: npm ci
 
