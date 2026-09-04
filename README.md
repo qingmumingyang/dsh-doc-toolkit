@@ -26,8 +26,18 @@
 
 ### 前置条件
 
-- 已安装 [DeepSeek Harness 桌面版](https://github.com/sdkwork-ai/deepseek-harness-desktop/releases)（社区桌面发行版，基于官方 [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)，建议 v0.1.0-rc.12 及以上）
+- 已安装 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 桌面版 / Web 运行时，兼容 **DSH v0.1.0-rc.12 → v0.1.2-alpha.5** 版本谱系（含 v0.1.0-rc 系列、v0.1.1-rc 系列、v0.1.2-alpha 系列）。本插件的 v0.1.1 在保持对 v0.1.0-rc.12 向后兼容的基础上，新增对 **v0.1.2-alpha.5** 的适配，并已在 DSH 0.1.2-alpha.5 上实测通过（`@deepseek-ai/dsh`、`@deepseek-ai/dsh-tools` 均为 0.1.2-alpha.5，cordis 4.0.2）
 - Node.js v18+ 与 npm（仅安装/开发时需要，运行时由 DSH 提供）
+
+> 💡 **还没有 DSH 0.1.2-alpha.5？两种方式装一个**
+>
+> **方式 A：官方源码运行时（推荐开发者）**
+> 到官方仓库的 [dsh-v0.1.2-alpha.5 Release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.2-alpha.5) 按文档安装 `@deepseek-ai/dsh@0.1.2-alpha.5` 并启动 `dsh web`。
+>
+> **方式 B：桌面版安装包（推荐普通用户，Windows/macOS/Linux）**
+> 从社区桌面发行版 [open-deepseek-harness-desktop](https://github.com/flaqai/open-deepseek-harness-desktop) 的 [odsh-v0.1.2-alpha.5 Release](https://github.com/flaqai/open-deepseek-harness-desktop/releases/tag/odsh-v0.1.2-alpha.5) 下载对应安装包（Windows 为 `DeepSeek-Harness-windows-x64.exe`），安装后首次启动完成初始化即可。
+>
+> 也可使用基于官方 DSH 的其他社区桌面发行版（如 [sdkwork-ai/deepseek-harness-desktop](https://github.com/sdkwork-ai/deepseek-harness-desktop/releases)，建议 v0.1.0-rc.12 及以上）。
 
 ### 方式一：从 GitHub 安装（推荐给普通用户）
 
@@ -244,7 +254,7 @@ dsh-doc-toolkit/
    生成含中文的 PDF 时依赖系统字体（Windows 通常自带 SimHei/微软雅黑，开箱即用）。无中文字体的精简环境可用 `DSH_CJK_FONT` 指定字体路径。
 
 6. **版本兼容**
-   插件的 `peerDependencies` 与桌面版内置版本匹配（`@deepseek-ai/cordis` 4.x、`@deepseek-ai/dsh-tools` 0.1.x-rc）。若桌面版升级后工具注册报错，请同步调整这两个版本范围。
+   插件的 `peerDependencies` 覆盖 DSH 运行时的内置版本（`@deepseek-ai/cordis` 4.x、`@deepseek-ai/dsh-tools` ≥0.1.0-rc.12 且 <0.2.0），因此 **v0.1.0-rc.12 起的整个 v0.1.x 谱系（含 v0.1.1-rc 系列、v0.1.2-alpha 系列，直至 v0.1.2-alpha.5）** 均可安装。v0.1.1 起在 DSH 0.1.2-alpha.5 上实测；若桌面版后续升级导致工具注册报错，请同步调整这两个版本范围。
 
 7. **超长内容自动截断**
    单次读取超过 50,000 字符时自动截断并标记 `truncated: true`（防止撑爆上下文）。PDF/DOCX 无法翻页，可缩小文档范围后分段处理。

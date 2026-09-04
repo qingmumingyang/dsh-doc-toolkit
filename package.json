@@ -1,6 +1,6 @@
 {
   "name": "dsh-doc-toolkit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH 文档读写工具包 - 支持 PDF/DOCX/XLSX/CSV 读写与 PDF 导出",
   "type": "module",
   "main": "lib/index.js",
