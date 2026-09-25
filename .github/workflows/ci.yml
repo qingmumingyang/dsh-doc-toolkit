@@ -32,6 +32,13 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # 只读复刻 DSH STORE 的固定源自动策略。0.2.0 起必须是零确定性原因：
+      # 一旦有人重新引入运行依赖、直接文件访问、环境变量读取或凭据记号，这里就会失败，
+      # 而不是等八小时后被商城判为 blocked。网络不可用时窗口会退回到快照值，
+      # 但退出码只看自动策略原因，不会因网络抖动误报。
+      - name: DSH STORE fixed-source policy gate
+        run: npm run verify:publish-policy
+
       - name: Verify lib/ is up to date
         run: |
           git diff --exit-code -- lib/ || {

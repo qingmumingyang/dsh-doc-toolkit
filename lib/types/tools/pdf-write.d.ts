@@ -1,5 +1,5 @@
 /**
- * 纯 JS PDF 生成器（零第三方运行时依赖）。
+ * 纯 JS PDF 生成器（零第三方运行时依赖、零直接文件访问）。
  *
  * 特性：
  * - A4 页面、自动换行与分页；支持标题（居中）、段落、表格（rows，首行作表头）。
@@ -8,8 +8,16 @@
  *   输出 Type0(CIDFontType2) + Identity-H + ToUnicode 结构，文本可复制、可搜索。
  * - 字体中缺失的字符（如 emoji）降级为 .notdef，并在返回消息中注明数量。
  *
- * 环境变量 DSH_CJK_FONT 可指定字体路径（TTF/TTC，分号分隔多个），优先级最高。
+ * 两个刻意的约束：
+ * 1. **不读环境变量**：字体候选来自插件配置 `cjkFonts`。DSH STORE 的固定源自动策略会把
+ *    任何环境变量读取记为 credentials 权限信号，见 PERMISSIONS.md。
+ * 2. **产物是纯 ASCII**：全部文件读写经 `ctx.fs`（见 utils/fs-channel.ts），而它只有文本
+ *    写入 API。因此含二进制的流（内嵌字体子集）改用 `/Filter [/ASCIIHexDecode /FlateDecode]`
+ *    编码，其余流本就是 ASCII 文本——整个 PDF 文件保持纯 ASCII，经 UTF-8 文本通道写出后
+ *    与原始字节完全一致。
  */
+import { type DocumentTarget } from '../utils/fs-channel.js';
+import type { PluginContext } from '../types/plugin-context.js';
 export interface ParsedFont {
     unitsPerEm: number;
     ascent: number;
@@ -64,5 +72,8 @@ export interface FontFace {
  * - title?: string        大标题（居中）
  * - paragraphs?: string[] 段落（也可用 content: string 按换行分段）
  * - rows?: unknown[][]    二维数组，渲染为表格（首行作表头）
+ *
+ * 字体候选按 `cjkFonts`（插件配置）→ 内置系统路径的顺序经 `ctx.fs` 探测读取；
+ * 产物经 `ctx.fs` 文本通道写出（因此必须是纯 ASCII，见文件头说明）。
  */
-export declare function writePDF(filePath: string, content: Record<string, unknown>, signal?: AbortSignal): Promise<string>;
+export declare function writePDF(ctx: PluginContext, exec: unknown, target: DocumentTarget, content: Record<string, unknown>, signal?: AbortSignal, extraFonts?: readonly string[]): Promise<string>;

@@ -1,5 +1,5 @@
 /**
- * 纯 JS PDF 生成器（零第三方运行时依赖）。
+ * 纯 JS PDF 生成器（零第三方运行时依赖、零直接文件访问）。
  *
  * 特性：
  * - A4 页面、自动换行与分页；支持标题（居中）、段落、表格（rows，首行作表头）。
@@ -8,13 +8,30 @@
  *   输出 Type0(CIDFontType2) + Identity-H + ToUnicode 结构，文本可复制、可搜索。
  * - 字体中缺失的字符（如 emoji）降级为 .notdef，并在返回消息中注明数量。
  *
- * 环境变量 DSH_CJK_FONT 可指定字体路径（TTF/TTC，分号分隔多个），优先级最高。
+ * 两个刻意的约束：
+ * 1. **不读环境变量**：字体候选来自插件配置 `cjkFonts`。DSH STORE 的固定源自动策略会把
+ *    任何环境变量读取记为 credentials 权限信号，见 PERMISSIONS.md。
+ * 2. **产物是纯 ASCII**：全部文件读写经 `ctx.fs`（见 utils/fs-channel.ts），而它只有文本
+ *    写入 API。因此含二进制的流（内嵌字体子集）改用 `/Filter [/ASCIIHexDecode /FlateDecode]`
+ *    编码，其余流本就是 ASCII 文本——整个 PDF 文件保持纯 ASCII，经 UTF-8 文本通道写出后
+ *    与原始字节完全一致。
  */
 
-import { readFile, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
 import { deflateSync } from 'node:zlib'
 import path from 'node:path'
+import { bytesToAsciiText, writeTargetText, type DocumentTarget } from '../utils/fs-channel.js'
+import type { PluginContext } from '../types/plugin-context.js'
+
+/** 单个字体候选文件的大小上限（TTC 集合较大，给足空间但仍有界）。 */
+const MAX_FONT_BYTES = 64 * 1024 * 1024
+
+/** 字节是否全是 ASCII（决定流能否直接原样写入）。 */
+function isPureAscii(data: Buffer): boolean {
+  for (let i = 0; i < data.length; i += 1) {
+    if (data[i] > 0x7f) return false
+  }
+  return true
+}
 
 // ---------- 页面常量（pt） ----------
 const PAGE_W = 595.28 // A4 宽
@@ -500,13 +517,11 @@ function assembleTtf(tables: Array<[string, Buffer]>): Buffer {
 // 字体查找
 // ============================================================
 
-/** 系统 CJK 字体候选（TTF/TTC），按优先级排列。 */
-function cjkFontCandidates(): string[] {
-  const env = process.env.DSH_CJK_FONT
-  const envFonts = env ? env.split(/[;:]/).map((s) => s.trim()).filter(Boolean) : []
+/** 系统 CJK 字体候选（TTF/TTC），按优先级排列；`extraFonts` 来自插件配置且优先。 */
+function cjkFontCandidates(extraFonts: readonly string[] = []): string[] {
   const win = (name: string): string => `C:\\Windows\\Fonts\\${name}`
   return [
-    ...envFonts,
+    ...extraFonts,
     win('simhei.ttf'),
     win('msyh.ttc'),
     win('simsun.ttc'),
@@ -778,7 +793,9 @@ class PdfBuilder {
   private count = 0
 
   constructor() {
-    this.push(Buffer.from('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n', 'latin1'))
+    // 首行后原本是 4 字节二进制标记（%âãÏÓ）；纯 ASCII 产物改用 ASCII 注释行，
+    // 该标记只是"文件含二进制"的提示约定，并非 PDF 规范要求。
+    this.push(Buffer.from('%PDF-1.4\n%ASCII\n', 'latin1'))
   }
 
   private push(data: Buffer): void {
@@ -797,13 +814,28 @@ class PdfBuilder {
     this.push(Buffer.from(line + '\n', 'latin1'))
   }
 
-  /** 写入一个 FlateDecode 压缩流对象，返回对象号。 */
+  /**
+   * 写入一个流对象，并保证落到文件里的字节是纯 ASCII。
+   *
+   * 已经全是 ASCII 的流（页面内容、ToUnicode CMap）原样写入，体积最小；含二进制字节的流
+   * （内嵌字体子集）编码为 ASCIIHex + Flate，即 `/Filter [/ASCIIHexDecode /FlateDecode]`
+   * ——解码顺序是先 ASCIIHex 再 Flate，因此写入的是 `hex(deflate(data)) + '>'`。
+   */
   writeStreamObj(data: Buffer): number {
-    const compressed = deflateSync(data)
+    if (isPureAscii(data)) {
+      const id = this.beginObj()
+      this.writeLine(`<< /Length ${data.length} >>`)
+      this.writeLine('stream')
+      this.push(data)
+      this.writeLine('endstream')
+      this.endObj()
+      return id
+    }
+    const encoded = Buffer.from(`${deflateSync(data).toString('hex').toUpperCase()}>`, 'latin1')
     const id = this.beginObj()
-    this.writeLine(`<< /Length ${compressed.length} /Filter /FlateDecode >>`)
+    this.writeLine(`<< /Length ${encoded.length} /Filter [/ASCIIHexDecode /FlateDecode] >>`)
     this.writeLine('stream')
-    this.push(compressed)
+    this.push(encoded)
     this.writeLine('endstream')
     this.endObj()
     return id
@@ -975,8 +1007,19 @@ function assemblePdf(pages: string[], emb: EmbeddedFont | undefined, meta: PdfMe
  * - title?: string        大标题（居中）
  * - paragraphs?: string[] 段落（也可用 content: string 按换行分段）
  * - rows?: unknown[][]    二维数组，渲染为表格（首行作表头）
+ *
+ * 字体候选按 `cjkFonts`（插件配置）→ 内置系统路径的顺序经 `ctx.fs` 探测读取；
+ * 产物经 `ctx.fs` 文本通道写出（因此必须是纯 ASCII，见文件头说明）。
  */
-export async function writePDF(filePath: string, content: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
+export async function writePDF(
+  ctx: PluginContext,
+  exec: unknown,
+  target: DocumentTarget,
+  content: Record<string, unknown>,
+  signal?: AbortSignal,
+  extraFonts: readonly string[] = []
+): Promise<string> {
+  const filePath = target.display
   const title = typeof content.title === 'string' && content.title.length > 0 ? content.title : undefined
 
   let paragraphs: string[] = []
@@ -1005,25 +1048,33 @@ export async function writePDF(filePath: string, content: Record<string, unknown
   let boldRef = 'F2'
 
   if (needCJK) {
-    let chosen: { parsed: ParsedFont; name: string; usedChars: number[]; missing: number } | undefined
-    for (const candidate of cjkFontCandidates()) {
-      if (!existsSync(candidate)) continue
+    for (const candidate of cjkFontCandidates(extraFonts)) {
+      // 字体是宿主上的普通文件：resolve + stat 探测存在性，缺失就试下一个候选。
+      // 读取不设围栏（fs-sandbox 只限制变更），因此系统字体目录可读。
+      let buf: Buffer
       try {
-        const buf = await readFile(candidate)
+        const fontTarget = await ctx.fs.resolve(candidate, signal === undefined ? {} : { signal })
+        const info = await ctx.fs.stat(fontTarget, signal)
+        if (info === undefined || info.type !== 'file') continue
+        const bytes = await ctx.fs.readBytes(fontTarget, signal, MAX_FONT_BYTES)
+        buf = Buffer.from(bytes)
+      } catch {
+        continue // 不可读/超限/不存在，尝试下一个候选
+      }
+      try {
         const sel = selectBestFont(buf, cps)
         const used = cps.filter((cp) => sel.font.charToGid.has(cp))
         if (used.length === 0) continue
         const name = path.basename(candidate).replace(/\.(ttf|ttc)$/i, '').replace(/[^A-Za-z0-9_-]/g, '') || 'CJKFont'
-        chosen = { parsed: sel.font, name, usedChars: used, missing: cps.length - used.length }
         const subset = buildSubset(sel.font, used)
-        emb = { parsed: sel.font, subset, name, usedChars: used, missingChars: chosen.missing }
+        emb = { parsed: sel.font, subset, name, usedChars: used, missingChars: cps.length - used.length }
         break
       } catch {
         continue // 字体损坏或不可解析，尝试下一个候选
       }
     }
     if (!emb) {
-      return `错误：内容包含非 ASCII 字符，但未找到可用的系统中文字体（TrueType）。可设置环境变量 DSH_CJK_FONT 指定 TTF/TTC 路径（分号分隔多个）。文件未生成: ${filePath}`
+      return `错误：内容包含非 ASCII 字符，但未找到可用的系统中文字体（TrueType）。可在插件配置 cjkFonts 中指定 TTF/TTC 绝对路径（字符串数组，可多个，优先于内置候选）。文件未生成: ${filePath}`
     }
     face = makeCidFace(emb)
     boldRef = 'F1' // 嵌入字体无粗体变体，标题/表头沿用同字体
@@ -1037,7 +1088,8 @@ export async function writePDF(filePath: string, content: Record<string, unknown
   if (rows) layout.table(rows)
 
   const pdf = assemblePdf(layout.pages, emb, { title })
-  await writeFile(filePath, pdf, { signal })
+  // 纯 ASCII 产物 + 文本通道 = 字节保真落盘（bytesToAsciiText 会在出现非 ASCII 时报错）
+  await writeTargetText(ctx, exec, target, bytesToAsciiText(new Uint8Array(pdf)), signal)
 
   const fontNote = emb
     ? `，内嵌字体 ${emb.name}（子集 ${emb.usedChars.length} 字符${emb.missingChars > 0 ? `，${emb.missingChars} 个字符缺失将无法渲染` : ''}）`

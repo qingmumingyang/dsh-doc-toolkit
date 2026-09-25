@@ -1,100 +1,22 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import fs from 'node:fs/promises'
-import path from 'node:path'
+import { buildDocx } from '../ooxml/docx.js'
+import { buildXlsx } from '../ooxml/xlsx.js'
 import { writePDF } from './pdf-write.js'
+import {
+  bytesToAsciiText,
+  describeWriteFailure,
+  resolveDocumentTarget,
+  writeTargetText
+} from '../utils/fs-channel.js'
+import { shortName } from '../utils/present.js'
+import type { DocToolkitConfig } from '../types/config.js'
 import type { PluginContext } from '../types/plugin-context.js'
-import { resolveFilePath } from '../utils/fs-path.js'
-
-/** docx 是 CJS 包，动态 import 时命名导出在类型层面不可靠，运行时统一取 default ?? 命名空间。 */
-interface DocxModule {
-  Document: new (options: object) => object
-  Packer: { toBuffer(doc: object): Promise<Buffer> }
-  Paragraph: new (options: object) => object
-  TextRun: new (options: object) => object
-  HeadingLevel: Record<string, unknown>
-  AlignmentType: Record<string, unknown>
-}
-
-async function loadDocx(): Promise<DocxModule> {
-  const mod = (await import('docx')) as unknown
-  const docx = ((mod as { default?: object }).default ?? mod) as DocxModule
-  return docx
-}
 
 /**
  * 把纯文本按行拆成段落（忽略空行）。
  */
 function textToParagraphs(content: string): string[] {
   return content.split(/\r?\n/).filter((p) => p.trim().length > 0)
-}
-
-async function writeDOCX(filePath: string, content: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
-  const { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } = await loadDocx()
-
-  let title: string | undefined
-  if (typeof content.title === 'string') title = content.title
-
-  let paragraphs: string[] = []
-  if (Array.isArray(content.paragraphs)) {
-    paragraphs = (content.paragraphs as unknown[]).map((p) => String(p))
-  } else if (typeof content.content === 'string') {
-    paragraphs = textToParagraphs(content.content)
-  } else {
-    return `错误：content 必须包含 paragraphs（字符串数组）、content（纯文本）或 title + paragraphs 字段，收到: ${JSON.stringify(content)}`
-  }
-
-  const children = []
-  if (title) {
-    children.push(new Paragraph({
-      heading: HeadingLevel.HEADING_1,
-      alignment: AlignmentType.CENTER,
-      children: [new TextRun({ text: title, bold: true, size: 36 })],
-    }))
-  }
-  for (const text of paragraphs) {
-    children.push(new Paragraph({ children: [new TextRun({ text, size: 24 })] }))
-  }
-
-  const doc = new Document({
-    sections: [{ properties: {}, children }],
-  })
-
-  const buffer = await Packer.toBuffer(doc)
-  await fs.writeFile(filePath, buffer, { signal })
-  return `成功写入 DOCX 文件: ${filePath}（${title ? `标题「${title}」+ ` : ''}${paragraphs.length} 个段落）`
-}
-
-async function writeXLSX(filePath: string, content: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
-  // xlsx 是 CJS 包：动态 import 时命名导出不可靠，统一取 default ?? 命名空间
-  const mod = (await import('xlsx')) as unknown
-  const XLSX = ((mod as { default?: unknown }).default ?? mod) as typeof import('xlsx')
-
-  const sheetName = typeof content.sheet_name === 'string' && content.sheet_name.length > 0
-    ? content.sheet_name.slice(0, 31) // Excel 工作表名上限 31 字符
-    : 'Sheet1'
-
-  let ws: ReturnType<typeof XLSX.utils.aoa_to_sheet>
-  let rowCount = 0
-
-  if (Array.isArray(content.rows)) {
-    // 二维数组 → aoa_to_sheet（保留数组语义，避免 json_to_sheet 对数组的歧义）
-    const rows = (content.rows as unknown[][]).map((row) => (row as unknown[]).map((cell) => (cell === null || cell === undefined ? '' : cell)))
-    ws = XLSX.utils.aoa_to_sheet(rows)
-    rowCount = rows.length
-  } else if (Array.isArray(content.data)) {
-    // 对象数组 → json_to_sheet（第一行对象键作为表头）
-    const data = content.data as Record<string, unknown>[]
-    ws = XLSX.utils.json_to_sheet(data)
-    rowCount = data.length
-  } else {
-    return `错误：content 必须包含 rows（二维数组）或 data（对象数组）字段，收到: ${JSON.stringify(content)}`
-  }
-
-  const wb = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(wb, ws, sheetName)
-  const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })
-  await fs.writeFile(filePath, buffer, { signal })
-  return `成功写入 XLSX 文件: ${filePath}（工作表「${sheetName}」，共 ${rowCount} 行数据）`
 }
 
 /**
@@ -108,35 +30,66 @@ function escapeCSVField(field: unknown): string {
   return text
 }
 
-async function writeCSV(filePath: string, content: Record<string, unknown>, signal?: AbortSignal): Promise<string> {
-  let csvContent = ''
-  let rowCount = 0
+/** 生成 DOCX 字节；内容非法时返回中文错误说明。 */
+export function buildDocxPackage(content: Record<string, unknown>): { bytes: Uint8Array } | { error: string } {
+  const title = typeof content.title === 'string' && content.title.length > 0 ? content.title : undefined
+
+  let paragraphs: string[] = []
+  if (Array.isArray(content.paragraphs)) {
+    paragraphs = (content.paragraphs as unknown[]).map((p) => String(p))
+  } else if (typeof content.content === 'string') {
+    paragraphs = textToParagraphs(content.content)
+  } else {
+    return { error: `错误：content 必须包含 paragraphs（字符串数组）、content（纯文本）或 title + paragraphs 字段，收到: ${JSON.stringify(content)}` }
+  }
+
+  return { bytes: buildDocx(title === undefined ? { paragraphs } : { title, paragraphs }) }
+}
+
+/** 生成 XLSX 字节；内容非法时返回中文错误说明。 */
+export function buildXlsxPackage(content: Record<string, unknown>): { bytes: Uint8Array; sheetName: string; rowCount: number } | { error: string } {
+  const sheetName = typeof content.sheet_name === 'string' && content.sheet_name.length > 0
+    ? content.sheet_name.slice(0, 31) // Excel 工作表名上限 31 字符
+    : 'Sheet1'
 
   if (Array.isArray(content.rows)) {
+    // 保留 null/undefined（含稀疏数组的空洞）：它们表示"该格不存在"，不写成空字符串。
+    const rows = (content.rows as unknown[][]).map((row) => (row as unknown[]).slice())
+    return { bytes: buildXlsx({ sheetName, rows }), sheetName, rowCount: rows.length }
+  }
+  if (Array.isArray(content.data)) {
+    // 对象数组：键的并集作为表头，缺失键补空
+    const data = content.data as Record<string, unknown>[]
+    const headers = [...new Set(data.flatMap((row) => Object.keys(row ?? {})))]
+    const rows: unknown[][] = [headers, ...data.map((row) => headers.map((h) => (row?.[h] === null || row?.[h] === undefined ? '' : row[h])))]
+    return { bytes: buildXlsx({ sheetName, rows }), sheetName, rowCount: data.length }
+  }
+  return { error: `错误：content 必须包含 rows（二维数组）或 data（对象数组）字段，收到: ${JSON.stringify(content)}` }
+}
+
+/** 生成 CSV 文本；内容非法时返回中文错误说明。 */
+export function buildCsvText(content: Record<string, unknown>): { text: string; rowCount: number } | { error: string } {
+  if (Array.isArray(content.rows)) {
     const rows = content.rows as unknown[][]
-    csvContent = rows.map((row) => (row as unknown[]).map(escapeCSVField).join(',')).join('\r\n')
-    rowCount = rows.length
-  } else if (Array.isArray(content.data)) {
+    return { text: rows.map((row) => (row as unknown[]).map(escapeCSVField).join(',')).join('\r\n'), rowCount: rows.length }
+  }
+  if (Array.isArray(content.data)) {
     const data = content.data as Record<string, unknown>[]
     const headers = [...new Set(data.flatMap((row) => Object.keys(row)))]
     const lines = [headers.map(escapeCSVField).join(',')]
     for (const row of data) {
       lines.push(headers.map((h) => escapeCSVField(row[h])).join(','))
     }
-    csvContent = lines.join('\r\n')
-    rowCount = data.length
-  } else if (typeof content.content === 'string') {
-    csvContent = content.content
-    rowCount = csvContent.split(/\r?\n/).filter((l) => l.trim().length > 0).length
-  } else {
-    return `错误：content 必须包含 rows（二维数组）、data（对象数组）或 content（纯文本）字段，收到: ${JSON.stringify(content)}`
+    return { text: lines.join('\r\n'), rowCount: data.length }
   }
-
-  await fs.writeFile(filePath, csvContent, { encoding: 'utf8', signal })
-  return `成功写入 CSV 文件: ${filePath}（共 ${rowCount} 行数据）`
+  if (typeof content.content === 'string') {
+    return { text: content.content, rowCount: content.content.split(/\r?\n/).filter((l) => l.trim().length > 0).length }
+  }
+  return { error: `错误：content 必须包含 rows（二维数组）、data（对象数组）或 content（纯文本）字段，收到: ${JSON.stringify(content)}` }
 }
 
-export function registerWriteTools(ctx: PluginContext) {
+export function registerWriteTools(ctx: PluginContext, config: DocToolkitConfig = {}) {
+  const cjkFonts = config.cjkFonts ?? []
   ctx.tools.register(
     defineTool({
       name: 'write_document',
@@ -145,7 +98,9 @@ export function registerWriteTools(ctx: PluginContext) {
 DOCX：content 包含 paragraphs（字符串数组）或 content（纯文本，按换行分段），可选 title（文档大标题）
 XLSX：content 包含 rows（二维数组）或 data（对象数组，键作为表头），可选 sheet_name（工作表名）
 CSV：content 包含 rows（二维数组）、data（对象数组）或 content（纯文本）
-PDF：content 包含 paragraphs（字符串数组）或 content（纯文本，按换行分段），可选 title（文档大标题）与 rows（二维数组，渲染为表格）；中文内容自动嵌入系统中文字体子集，文本可复制搜索`,
+PDF：content 包含 paragraphs（字符串数组）或 content（纯文本，按换行分段），可选 title（文档大标题）与 rows（二维数组，渲染为表格）；中文内容自动嵌入系统中文字体子集，文本可复制搜索
+
+写入路径受会话沙箱约束：workspace-write 模式下只能写工作区内或临时目录。`,
       parameters: {
         file_path: {
           type: 'string',
@@ -169,33 +124,51 @@ PDF：content 包含 paragraphs（字符串数组）或 content（纯文本，�
         schema: { type: 'string' },
         render: (_args, value) => [{ type: 'text', text: value }]
       },
+      // 卡片契约：生成物是二进制（DOCX/XLSX/PDF），内置的 diff 词表无法表达，
+      // 因此 pending 用 generic + kind:'edit'，completed 只在失败时替换标题。
+      presentCall: (args) => ({
+        card: 'generic',
+        title: `生成 ${String(args.format).toUpperCase()} 文档 ${shortName(args.file_path)}`,
+        kind: 'edit',
+        locations: [{ path: args.file_path }]
+      }),
+      presentResult: (_args, result) => (result.isError ? { card: 'generic', title: '生成文档失败' } : undefined),
       async execute(args, exec) {
-        // 相对路径按 DSH 后端语义解析（会话工作区为基准），绝对路径原样使用
-        const filePath = await resolveFilePath(ctx, args.file_path, exec.signal)
-        const dir = path.dirname(filePath)
-        try {
-          await fs.mkdir(dir, { recursive: true })
-        } catch {
-          // 目录可能已存在
-        }
+        const target = await resolveDocumentTarget(ctx, exec, args.file_path, exec.signal)
 
         try {
           switch (args.format) {
-            case 'docx':
-              return await writeDOCX(filePath, args.content, exec.signal)
-            case 'xlsx':
-              return await writeXLSX(filePath, args.content, exec.signal)
-            case 'csv':
-              return await writeCSV(filePath, args.content, exec.signal)
+            case 'docx': {
+              const built = buildDocxPackage(args.content)
+              if ('error' in built) return built.error
+              await writeTargetText(ctx, exec, target, bytesToAsciiText(built.bytes), exec.signal)
+              const title = typeof args.content.title === 'string' && args.content.title.length > 0 ? args.content.title : undefined
+              const count = Array.isArray(args.content.paragraphs)
+                ? args.content.paragraphs.length
+                : typeof args.content.content === 'string' ? textToParagraphs(args.content.content).length : 0
+              return `成功写入 DOCX 文件: ${target.display}（${title ? `标题「${title}」+ ` : ''}${count} 个段落）`
+            }
+            case 'xlsx': {
+              const built = buildXlsxPackage(args.content)
+              if ('error' in built) return built.error
+              await writeTargetText(ctx, exec, target, bytesToAsciiText(built.bytes), exec.signal)
+              return `成功写入 XLSX 文件: ${target.display}（工作表「${built.sheetName}」，共 ${built.rowCount} 行数据）`
+            }
+            case 'csv': {
+              const built = buildCsvText(args.content)
+              if ('error' in built) return built.error
+              await writeTargetText(ctx, exec, target, built.text, exec.signal)
+              return `成功写入 CSV 文件: ${target.display}（共 ${built.rowCount} 行数据）`
+            }
             case 'pdf':
-              return await writePDF(filePath, args.content, exec.signal)
+              return await writePDF(ctx, exec, target, args.content, exec.signal, cjkFonts)
             default:
               return `不支持的格式: ${args.format}`
           }
         } catch (err) {
           return JSON.stringify({
-            error: `写入文件失败: ${err instanceof Error ? err.message : String(err)}`,
-            file_path: filePath,
+            error: `写入文件失败: ${describeWriteFailure(err, target.display)}`,
+            file_path: target.display,
             format: args.format
           }, null, 2)
         }

@@ -1,67 +1,19 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { createRequire } from 'node:module'
-import fs from 'node:fs/promises'
 import path from 'node:path'
+import { extractPdfText } from '../pdf/text-extract.js'
+import { readZip } from '../zip/read.js'
+import { readDocxText } from '../ooxml/docx.js'
+import { readXlsxSheets } from '../ooxml/xlsx.js'
+import { readTargetBytes, resolveDocumentTarget, MAX_READ_BYTES } from '../utils/fs-channel.js'
+import { shortName } from '../utils/present.js'
 import type { ReadResult } from '../types/index.js'
 import type { PluginContext } from '../types/plugin-context.js'
-import { resolveFilePath } from '../utils/fs-path.js'
 
 /** 单次返回的最大字符数（PDF/DOCX 全文可能很长，超出后截断并标记，防止撑爆上下文）。 */
 const MAX_TEXT_CHARS = 50000
 
-/**
- * 解析 PDF 文本层。
- *
- * 两个关键点（都是 pdf-parse 的已知坑）：
- * 1. 不引入包入口 `index.js`：它有 `let isDebugMode = !module.parent` 调试钩子，
- *    模块被 ESM 加载时 module.parent 为 null 会误触发内置测试分支而崩溃，因此
- *    直接引入 `lib/pdf-parse.js`。
- * 2. 必须用 CJS require 加载：其内置 pdf.js v1.10.x 在 ESM import 方式下
- *    XRef 解析会报 "bad XRef entry"（对任何合法 PDF），CJS require 则正常。
- *    `createRequire` 是 Node 在 ESM 中调用 CJS 的标准方式。
- */
-const require = createRequire(import.meta.url)
-interface PDFParseResult {
-  text: string
-  numpages: number
-}
-const pdfParse: (buf: Uint8Array) => Promise<PDFParseResult> = require('pdf-parse/lib/pdf-parse.js')
-
-async function parseDOCX(filePath: string): Promise<{ text: string; messages: string[] }> {
-  const mammoth = await import('mammoth')
-  const result = await mammoth.extractRawText({ path: filePath })
-  return { text: result.value, messages: result.messages.map((m) => m.message) }
-}
-
-/**
- * 把工作簿的每个工作表读取为一行行的 TSV 文本（`[Sheet: 名称]` 开头），
- * 再按 offset/limit 在"行"级别做窗口切片（跨表连续计数）。
- */
-async function parseXLSX(filePath: string, offset?: number, limit?: number): Promise<{ text: string; total: number; truncated: boolean }> {
-  // xlsx 是 CJS 包：动态 import 时命名导出不可靠，统一取 default ?? 命名空间
-  const mod = (await import('xlsx')) as unknown
-  const XLSX = ((mod as { default?: unknown }).default ?? mod) as typeof import('xlsx')
-  const workbook = XLSX.readFile(filePath)
-  const lines: string[] = []
-  const sheetNames = workbook.SheetNames
-
-  for (const sheetName of sheetNames) {
-    const sheet = workbook.Sheets[sheetName]
-    const jsonData = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '' })
-    lines.push(`[Sheet: ${sheetName}]`)
-    for (const row of jsonData) {
-      lines.push((row as unknown[]).map((cell) => (cell === null || cell === undefined ? '' : String(cell))).join('\t'))
-    }
-  }
-
-  const start = Math.max(0, (offset ?? 1) - 1)
-  const end = limit !== undefined ? Math.min(lines.length, start + limit) : lines.length
-  return {
-    text: lines.slice(start, end).join('\n'),
-    total: lines.length,
-    truncated: end < lines.length
-  }
-}
+/** 单次解析的最大页数/字符数上限（解析器内部的硬边界，防止恶意文件拖垮进程）。 */
+const PDF_LIMITS = { maxBytes: MAX_READ_BYTES, maxPages: 2000, maxChars: 4000000 } as const
 
 /**
  * RFC 4180 风格的 CSV 解析：支持双引号包裹字段、字段内逗号/换行/转义双引号。
@@ -110,27 +62,42 @@ function parseCSVRows(content: string): string[][] {
  * 解码文件字节为文本：优先严格 UTF-8，失败（含非法序列）时回退 GBK——
  * 中国用户常见的 Excel 导出 CSV 是 GBK/GB18030 编码，零依赖自动兼容。
  */
-function decodeText(buffer: Buffer): string {
+function decodeText(bytes: Uint8Array): string {
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
   } catch {
-    return new TextDecoder('gbk').decode(buffer)
+    return new TextDecoder('gbk').decode(bytes)
   }
 }
 
-async function parseCSV(filePath: string, offset?: number, limit?: number, signal?: AbortSignal): Promise<{ text: string; total: number; truncated: boolean }> {
-  const buffer = await fs.readFile(filePath, { signal })
-  let content = decodeText(buffer)
-  if (content.charCodeAt(0) === 0xfeff) content = content.slice(1) // 去掉 UTF-8 BOM
-  const rows = parseCSVRows(content)
+/** 在"行"级别做 offset/limit 窗口切片，并回报总行数与是否被截断。 */
+function windowLines(lines: readonly string[], offset?: number, limit?: number): { text: string; total: number; truncated: boolean } {
   const start = Math.max(0, (offset ?? 1) - 1)
-  const end = limit !== undefined ? Math.min(rows.length, start + limit) : rows.length
-  const window = rows.slice(start, end).map((row) => row.join('\t'))
+  const end = limit !== undefined ? Math.min(lines.length, start + limit) : lines.length
   return {
-    text: window.join('\n'),
-    total: rows.length,
-    truncated: end < rows.length
+    text: lines.slice(start, end).join('\n'),
+    total: lines.length,
+    truncated: end < lines.length
   }
+}
+
+/** CSV/TXT → TSV 行（超长行按 MAX_TEXT_CHARS 截断，避免单行撑爆上下文）。 */
+function readCsvLines(bytes: Uint8Array): string[] {
+  let content = decodeText(bytes)
+  if (content.charCodeAt(0) === 0xfeff) content = content.slice(1) // 去掉 UTF-8 BOM
+  return parseCSVRows(content).map((row) => row.join('\t'))
+}
+
+/** 工作簿 → `[Sheet: 名称]` + 每行 TSV，跨表连续计数以便分页。 */
+function readXlsxLines(bytes: Uint8Array): string[] {
+  const lines: string[] = []
+  for (const sheet of readXlsxSheets(readZip(bytes))) {
+    lines.push(`[Sheet: ${sheet.name}]`)
+    for (const row of sheet.rows) {
+      lines.push(row.map((cell) => (cell === null || cell === undefined ? '' : String(cell))).join('\t'))
+    }
+  }
+  return lines
 }
 
 function detectFormat(filePath: string): string {
@@ -178,15 +145,29 @@ export function registerReadTools(ctx: PluginContext) {
         schema: { type: 'string' },
         render: (_args, value) => [{ type: 'text', text: value }]
       },
+      // 卡片契约：pending 卡片只读已校验参数；completed 卡片只在失败时替换标题，
+      // 成功时返回 undefined，交给 UI 的通用兜底渲染模型可见正文（不重复编码）。
+      presentCall: (args) => ({
+        card: 'generic',
+        title: `读取文档 ${shortName(args.file_path)}`,
+        kind: 'read',
+        locations: [
+          {
+            path: args.file_path,
+            ...(typeof args.offset === 'number' && args.offset > 0 ? { line: args.offset } : {})
+          }
+        ]
+      }),
+      presentResult: (_args, result) => (result.isError ? { card: 'generic', title: '读取文档失败' } : undefined),
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        // 相对路径按 DSH 后端语义解析（会话工作区为基准），绝对路径原样使用
-        const filePath = await resolveFilePath(ctx, args.file_path, exec.signal)
-        const format = args.format === 'auto' || !args.format ? detectFormat(filePath) : args.format
+        // 相对路径按会话工作区解析；绝对路径交给后端（读不受沙箱围栏限制）
+        const target = await resolveDocumentTarget(ctx, exec, args.file_path, exec.signal)
+        const format = args.format === 'auto' || !args.format ? detectFormat(target.absolute) : args.format
 
         if (format === 'unknown') {
           return JSON.stringify({
-            error: `无法识别文件格式: ${filePath}`,
+            error: `无法识别文件格式: ${target.display}`,
             supported: ['pdf', 'docx', 'xlsx', 'csv', 'txt']
           }, null, 2)
         }
@@ -195,36 +176,34 @@ export function registerReadTools(ctx: PluginContext) {
         try {
           switch (format) {
             case 'pdf': {
-              const dataBuffer = await fs.readFile(filePath, { signal: exec.signal })
-              // 关键：必须把 Node Buffer 拷贝为独立 Uint8Array 再交给 pdf.js。
-              // 小文件 readFile 返回的 Buffer 来自共享内存池（byteOffset ≠ 0），
-              // pdf.js v1.10 会把池中垃圾数据当成 PDF 内容解析，导致
-              // "bad XRef entry" 间歇性失败（文件越大越不易复现）。
-              const parsed = await pdfParse(new Uint8Array(dataBuffer))
+              const bytes = await readTargetBytes(ctx, target, exec.signal)
+              const parsed = extractPdfText(bytes, PDF_LIMITS)
               result.content = parsed.text
               result.total_lines = parsed.text.split('\n').length
-              result.pages = parsed.numpages
+              result.pages = parsed.pages
+              if (parsed.truncated) result.warnings = ['PDF 内容超过解析上限，仅提取了前面部分']
               break
             }
             case 'docx': {
-              const parsed = await parseDOCX(filePath)
-              result.content = parsed.text
-              result.total_lines = parsed.text.split('\n').length
-              if (parsed.messages.length > 0) result.warnings = parsed.messages
+              const bytes = await readTargetBytes(ctx, target, exec.signal)
+              result.content = readDocxText(readZip(bytes))
+              result.total_lines = result.content.split('\n').length
               break
             }
             case 'xlsx': {
-              const parsed = await parseXLSX(filePath, args.offset, args.limit)
-              result.content = parsed.text
-              result.total_lines = parsed.total
-              result.truncated = parsed.truncated
+              const bytes = await readTargetBytes(ctx, target, exec.signal)
+              const win = windowLines(readXlsxLines(bytes), args.offset, args.limit)
+              result.content = win.text
+              result.total_lines = win.total
+              result.truncated = win.truncated
               break
             }
             case 'csv': {
-              const parsed = await parseCSV(filePath, args.offset, args.limit, exec.signal)
-              result.content = parsed.text
-              result.total_lines = parsed.total
-              result.truncated = parsed.truncated
+              const bytes = await readTargetBytes(ctx, target, exec.signal)
+              const win = windowLines(readCsvLines(bytes), args.offset, args.limit)
+              result.content = win.text
+              result.total_lines = win.total
+              result.truncated = win.truncated
               break
             }
             default:
@@ -233,7 +212,7 @@ export function registerReadTools(ctx: PluginContext) {
         } catch (err) {
           return JSON.stringify({
             error: `读取文件失败: ${err instanceof Error ? err.message : String(err)}`,
-            file_path: filePath,
+            file_path: target.display,
             format
           }, null, 2)
         }

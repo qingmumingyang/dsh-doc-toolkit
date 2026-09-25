@@ -1,3 +1,9 @@
 - insert:
   - id: dsh-doc-toolkit
     name: dsh-doc-toolkit
+    # Cordis 标准配置行：loader 会按插件导出的 Config Schema 校验这里的字段。
+    # cjkFonts：追加的 CJK 字体候选（TTF/TTC 绝对路径），优先于内置系统字体候选。
+    # 留空数组表示只用内置候选（Windows/macOS/Linux 常见中文字体各一条）。
+    # 注意：后续 patch 层会整体替换该行的 config，而不是深合并。
+    config:
+      cjkFonts: []

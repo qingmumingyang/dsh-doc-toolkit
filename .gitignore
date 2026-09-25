@@ -24,6 +24,10 @@ test-output/
 *.test.xlsx
 *.test.csv
 
+# 测试用第三方 PDF 夹具：由 tests/oracle-pdf.test.mjs 按需下载（离线自动跳过），
+# 不随仓库再分发第三方样例文件。
+tests/fixtures/
+
 # 说明：tests/（node:test 测试套件）刻意【不】忽略，随仓库发布；
 # test-output/ 仅存放本地诊断脚本与临时产物。
 
