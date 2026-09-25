@@ -47,6 +47,10 @@ export interface ParsedFont {
 export declare function parseFont(buf: Buffer, fontIndex?: number): ParsedFont;
 /**
  * 在 TTF/TTC 中选择对给定字符集覆盖最好的字体。
+ *
+ * `bestScore` 从 0 起（而不是 -1）：**一个字符都覆盖不到的子字体视为不可用**，
+ * 宁可让调用方继续试下一个候选，也不要选出一个"能解析但没有任何所需字形"的字体
+ * ——那会写出中文全是 .notdef 的 PDF。
  */
 export declare function selectBestFont(buf: Buffer, cps: number[]): {
     font: ParsedFont;

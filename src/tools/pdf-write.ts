@@ -113,7 +113,12 @@ export function parseFont(buf: Buffer, fontIndex = 0): ParsedFont {
   for (let i = 0; i < numTables; i++) {
     const rec = base + 12 + i * 16
     const name = buf.subarray(rec, rec + 4).toString('latin1')
-    tables.set(name, { offset: base + u32(buf, rec + 8), length: u32(buf, rec + 12) })
+    // OpenType 规范：TTC 里表目录的 offset 是**相对整个 TTC 文件开头**的（这样多个子字体
+    // 才能共享同一份 glyf/loca），不是相对子字体目录。早先这里写成 `base + offset`，
+    // 于是所有表都读偏，msyh.ttc 的第一个子字体甚至被读成 numGlyphs=0 的"合法"字体：
+    // 字形极少、CJK 全部缺失，却仍然被选中并写出一个中文全是 .notdef 的 PDF
+    // （macOS 的 PingFang.ttc、Linux 的 wqy-zenhei.ttc 都会踩到）。
+    tables.set(name, { offset: u32(buf, rec + 8), length: u32(buf, rec + 12) })
   }
   const need = (tagName: string): Buffer => {
     const t = tables.get(tagName)
@@ -129,6 +134,9 @@ export function parseFont(buf: Buffer, fontIndex = 0): ParsedFont {
   const numGlyphs = u16(maxp, 4)
   const unitsPerEm = u16(head, 18)
   if (unitsPerEm === 0) throw new Error('字体 unitsPerEm 为 0')
+  // 解析结果自检：numGlyphs 为 0 说明表指针读错了（TTC 偏移算错时就是这样），
+  // 这种"看似合法"的字体必须当成不可用，否则会静默写出中文全缺的 PDF。
+  if (numGlyphs === 0) throw new Error('字体 maxp 表报告 0 个字形（表偏移可能不正确）')
 
   const indexToLocFormat = i16(head, 50)
   const locaTable = need('loca')
@@ -255,12 +263,16 @@ function parseCmap(cmap: Buffer): Map<number, number> {
 
 /**
  * 在 TTF/TTC 中选择对给定字符集覆盖最好的字体。
+ *
+ * `bestScore` 从 0 起（而不是 -1）：**一个字符都覆盖不到的子字体视为不可用**，
+ * 宁可让调用方继续试下一个候选，也不要选出一个"能解析但没有任何所需字形"的字体
+ * ——那会写出中文全是 .notdef 的 PDF。
  */
 export function selectBestFont(buf: Buffer, cps: number[]): { font: ParsedFont; index: number } {
   if (buf.subarray(0, 4).toString('latin1') === 'ttcf') {
     const numFonts = u32(buf, 8)
     let best: ParsedFont | undefined
-    let bestScore = -1
+    let bestScore = 0
     let bestIndex = -1
     for (let i = 0; i < numFonts; i++) {
       let f: ParsedFont
@@ -276,7 +288,7 @@ export function selectBestFont(buf: Buffer, cps: number[]): { font: ParsedFont; 
         bestIndex = i
       }
     }
-    if (!best) throw new Error('TTC 中无可用 TrueType 字体')
+    if (!best) throw new Error('TTC 中无可用 TrueType 字体（没有子字体覆盖所需字符）')
     return { font: best, index: bestIndex }
   }
   return { font: parseFont(buf, 0), index: 0 }
@@ -1064,7 +1076,9 @@ export async function writePDF(
       try {
         const sel = selectBestFont(buf, cps)
         const used = cps.filter((cp) => sel.font.charToGid.has(cp))
-        if (used.length === 0) continue
+        // 必须至少覆盖**一个非 ASCII 字符**才算解决了中文排版问题：只覆盖 ASCII 的字体
+        // （例如 TTC 里选错的子字体）会让中文全部退化成 .notdef，属于静默产出坏文件。
+        if (!used.some((cp) => cp > 0x7f)) continue
         const name = path.basename(candidate).replace(/\.(ttf|ttc)$/i, '').replace(/[^A-Za-z0-9_-]/g, '') || 'CJKFont'
         const subset = buildSubset(sel.font, used)
         emb = { parsed: sel.font, subset, name, usedChars: used, missingChars: cps.length - used.length }

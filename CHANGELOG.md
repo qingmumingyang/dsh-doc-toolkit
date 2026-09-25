@@ -10,7 +10,7 @@
 
 ---
 
-## [0.2.0] — 未发布
+## [0.2.0] — 2026-09-25
 
 **目标：让插件满足 DSH STORE 的固定源自动策略（零运行依赖 + 零权限信号），
 从而自动进入 `approved` 可安装状态；同时按准入规则与 `build-dsh-plugin` 的 bundle 契约补齐声明。**
@@ -77,6 +77,25 @@
   `source` 改为语义正确的 `'bundled'`（原先传的是文件路径）。改 `SKILL.md` 后必须重新生成。
 - 新增 `PERMISSIONS.md`（依赖/权限/外部服务/失败边界声明，供 STORE 复核）、
   `SECURITY.md`（风险分级 R1、能力摘要、边界自检、漏洞报告）与本文件 `CHANGELOG.md`。
+
+### 修复（首次推送后由 CI 发现）
+
+- **TTC 集合字体（`.ttc`）解析错误**：按 OpenType 规范，TTC 里表目录的 `offset` 是**相对整个
+  TTC 文件开头**的（多个子字体借此共享同一份 `glyf`/`loca`），而原实现按"相对子字体目录"多加了
+  一次 `base`，导致每张表都读偏。后果：`msyh.ttc` 的第一个子字体被解析成 `numGlyphs = 0` 的
+  "合法"字体，字形几乎为空、CJK 全部缺失，却仍被选中并写出一个中文全是 `.notdef` 的 PDF，
+  返回消息还报"成功写入"。
+  影响面是 **Linux（`wqy-zenhei.ttc`）与 macOS（`PingFang.ttc`、`Hiragino Sans GB.ttc`）**；
+  Windows 先命中 `simhei.ttf`（纯 TTF），本地看不出来——这正是首次推送时 CI 在 Node 18/20/22
+  三个矩阵上同时失败的原因。
+- 三处防回归加固，杜绝同类"静默产出坏文件"：
+  1. `parseFont` 在 `numGlyphs === 0` 时抛错（表指针读错的典型症状）；
+  2. `selectBestFont` 把"一个字符都覆盖不到"的子字体视为不可用（评分从 0 起而非 -1 起）；
+  3. 写入器要求候选字体**至少覆盖一个非 ASCII 字符**才接受，否则继续试下一个候选；
+     全部候选都不行时报"未找到可用的系统中文字体"而**不生成文件**。
+- 新增回归用例「PDF 中文导出：TTC 集合字体也能正确嵌入并读回」：在已知 TTC 路径里挑一个
+  （Windows `msyh.ttc`/`simsun.ttc`、macOS `PingFang.ttc`、Linux `wqy-zenhei.ttc` 等），
+  强制用它写中文 PDF，断言无缺字、产物纯 ASCII、且能被自己读回。
 
 ### 测试与 CI
 

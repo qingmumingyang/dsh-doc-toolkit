@@ -13,7 +13,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -241,6 +241,55 @@ test('写入：自动创建父目录', async () => {
   assert.ok(msg.includes('成功写入 CSV'), msg)
   const r = await readDoc({ file_path: file, format: 'csv' })
   assert.equal(r.content, 'a\tb')
+})
+
+// ---------- PDF 中文字体：TTC 集合（macOS/Linux 的常见情形） ----------
+test('PDF 中文导出：TTC 集合字体也能正确嵌入并读回', async (t) => {
+  // 回归用例：TTC 的表偏移是相对整个文件开头的（多个子字体共享 glyf/loca）。
+  // 早先把偏移当成"相对子字体目录"，导致 msyh.ttc 被解析成 0 字形的"合法"字体，
+  // 于是写出中文全是 .notdef 的 PDF 却仍然报"成功"——CI（Linux 只有 wqy-zenhei.ttc）
+  // 和 macOS（PingFang.ttc）都会踩到，而 Windows 先命中 simhei.ttf 所以看不出来。
+  const candidates = [
+    'C:\\Windows\\Fonts\\msyh.ttc',
+    'C:\\Windows\\Fonts\\simsun.ttc',
+    '/System/Library/Fonts/PingFang.ttc',
+    '/System/Library/Fonts/Hiragino Sans GB.ttc',
+    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
+    '/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc',
+  ]
+  const ttc = candidates.find((candidate) => existsSync(candidate))
+  if (ttc === undefined) {
+    t.skip('本机没有 TTC 中文字体，跳过')
+    return
+  }
+
+  const localRegistered = []
+  const localCtx = {
+    tools: { register: (def) => { localRegistered.push(def); return () => {} } },
+    skills: { register: () => () => {} },
+    fs: createHostFs({ baseCwd: WORK }),
+    logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
+    inject: (services, cb) => cb(localCtx),
+  }
+  apply(localCtx, { cjkFonts: [ttc] })
+  const local = Object.fromEntries(localRegistered.map((def) => [def.name, def]))
+
+  const file = join(WORK, 'ttc.pdf')
+  const msg = await local.write_document.execute({
+    file_path: file,
+    format: 'pdf',
+    content: { title: '测试 PDF', paragraphs: ['第一行中文', '第二行中文'] },
+  }, exec)
+  assert.ok(msg.includes('成功写入 PDF'), msg)
+  assert.ok(msg.includes('内嵌字体'), `应内嵌字体子集：${msg}`)
+  assert.ok(!/\d+ 个字符缺失/.test(msg), `TTC 字体应覆盖全部字形，实际：${msg}`)
+
+  const bytes = readFileSync(file)
+  assert.deepEqual([...bytes].filter((b) => b > 0x7f), [], 'PDF 产物必须是纯 ASCII')
+
+  const r = JSON.parse(await local.read_document.execute({ file_path: file, format: 'pdf' }, exec))
+  assert.ok(r.content.includes('测试 PDF'), `应提取出中文标题，实际: ${JSON.stringify(r.content)}`)
+  assert.ok(r.content.includes('第二行中文'), `应提取出中文正文，实际: ${JSON.stringify(r.content)}`)
 })
 
 // ---------- Cordis 标准插件配置（替代已移除的环境变量） ----------
