@@ -788,11 +788,18 @@ test('buildStoredZip 输出确定，CRC-32 与标准实现一致', () => {
   ]
   assert.deepEqual(Array.from(buildStoredZip(entries)), Array.from(buildStoredZip(entries)), '相同输入必须产生相同字节')
 
-  const require = createRequire(import.meta.url)
-  const zlib = require('node:zlib')
-  const sample = encoder.encode('The quick brown fox jumps over the lazy dog')
-  assert.equal(crc32(sample), zlib.crc32(sample))
-  assert.equal(crc32(sample), 0x414fa339)
+  // 与 Node 版本无关的标准校验值（CRC-32/ISO-HDLC）：
+  // "123456789" = 0xCBF43926、"The quick brown fox…" = 0x414FA339、空输入 = 0。
+  assert.equal(crc32(encoder.encode('123456789')), 0xcbf43926)
+  assert.equal(crc32(encoder.encode('The quick brown fox jumps over the lazy dog')), 0x414fa339)
   assert.equal(crc32(new Uint8Array(0)), 0)
-  assert.equal(crc32(encoder.encode('中文')), zlib.crc32(Buffer.from('中文')))
+
+  // Node 的 zlib.crc32 是 v20.15 / v22.2 才有的，CI 的 18 号矩阵没有它——
+  // 因此只在可用时做交叉验证，标准向量才是常驻断言。
+  const zlib = createRequire(import.meta.url)('node:zlib')
+  if (typeof zlib.crc32 === 'function') {
+    const sample = encoder.encode('The quick brown fox jumps over the lazy dog')
+    assert.equal(crc32(sample), zlib.crc32(sample))
+    assert.equal(crc32(encoder.encode('中文')), zlib.crc32(Buffer.from('中文')))
+  }
 })

@@ -96,6 +96,10 @@
 - 新增回归用例「PDF 中文导出：TTC 集合字体也能正确嵌入并读回」：在已知 TTC 路径里挑一个
   （Windows `msyh.ttc`/`simsun.ttc`、macOS `PingFang.ttc`、Linux `wqy-zenhei.ttc` 等），
   强制用它写中文 PDF，断言无缺字、产物纯 ASCII、且能被自己读回。
+- **测试套件在 Node 18 上会失败**：CRC-32 对照用了 `zlib.crc32()`，而它是 Node v20.15 / v22.2
+  才加入的 API。改为常驻的**版本无关标准校验值**（`CRC32("123456789") = 0xCBF43926`、
+  `CRC32("The quick brown fox…") = 0x414FA339`、空输入 = 0），仅在该 API 存在时做交叉验证。
+  本机已用 Node 18.20.8 复跑：79 例全绿。
 
 ### 测试与 CI
 
